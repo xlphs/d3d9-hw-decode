@@ -13,6 +13,9 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Data">
+      <UniqueIdentifier>{ad1c73f0-36e0-4d2e-a544-d1183377d324}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <Text Include="ReadMe.txt" />
@@ -54,5 +57,31 @@
     <Image Include="qsv32.ico">
       <Filter>Resource Files</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\avcodec-57.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\avdevice-57.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\avfilter-6.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\avformat-57.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\avutil-55.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\postproc-54.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\swresample-2.dll">
+      <Filter>Data</Filter>
+    </None>
+    <None Include="..\swscale-4.dll">
+      <Filter>Data</Filter>
+    </None>
   </ItemGroup>
 </Project>

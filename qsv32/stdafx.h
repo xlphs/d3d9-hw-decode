@@ -34,9 +34,12 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libavutil/mem.h>
 
-	// for dxva_context, which ffmpeg says:
-	// The application must make it available as AVCodecContext.hwaccel_context.
+// for dxva_context, which ffmpeg says:
+// The application must make it available as AVCodecContext.hwaccel_context.
 #include <libavcodec/dxva2.h>
+
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_dxva2.h>
 
 }
 #pragma comment(lib, "avcodec.lib")
