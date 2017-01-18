@@ -670,7 +670,9 @@ void render_frame(AVFrame *frame) {
 			// draw render surface to back buffer
 			IDirect3DSurface9 *backbuf = NULL;
 			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
-			d3d9dev->StretchRect(d9RenderSurface, NULL, backbuf, &targetRect, D3DTEXF_LINEAR);
+			RECT frameRect = { 0, 0, frame->width, frame->height };
+			d3d9dev->StretchRect(d9RenderSurface, &frameRect,
+				backbuf, &targetRect, D3DTEXF_LINEAR);
 
 			d3d9dev->EndScene();
 			// end tiny rendering loop
