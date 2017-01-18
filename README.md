@@ -19,8 +19,16 @@ decoding loop at 30 fps
 ffmpeg_dxva.c: https://github.com/FFmpeg/FFmpeg/blob/master/ffmpeg_dxva2.c
 
 intel mms: https://software.intel.com/sites/landingpage/mmsf/documentation/index.html
-(if you confused about how to render nv12 then look at this)
+(if you are confused about how to render nv12 then look at this, this program 
+renders with DirectX 9 but I learned a lot from their opengl example 
+https://software.intel.com/sites/default/files/managed/39/6d/mmsoglwin1.zip)
 
 qtav: https://github.com/wang-bin/QtAV
 
 mythtv: https://github.com/MythTV/mythtv
+
+# todo
+
+I was hoping to get qsv to work (that's why this project is named qsv32) but
+then I realized (as time of writing) FFmpeg doesn't yet support QSV-accelerated
+HEVC decoding so I will revisit qsv implementation later.
