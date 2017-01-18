@@ -26,6 +26,11 @@ HANDLE dxvadev = NULL;
 IDirect3DSurface9 *d9RenderSurface = NULL;
 RECT targetRect;
 
+// FFmpeg decoder
+AVFormatContext *avFormatCtx = NULL;
+AVCodecContext *codecCtx = NULL;
+UINT TimerId = 0;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -40,7 +45,9 @@ void CheckSupportedCodecs();
 void CheckD3D9ColorConversion();
 void CreateOffscreenPlainSurface(int width, int height);
 
+void SetupDecoder();
 void Decode();
+void TeardownDecoder();
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/bb970490(v=vs.85).aspx
 HRESULT CreateD3DDeviceManager(
@@ -95,8 +102,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 			DispatchMessage(&msg);
 		}
 	}
-
-	teardown_d3d();
 
 	return (int)msg.wParam;
 }
@@ -219,16 +224,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		// Parse the menu selections:
 		switch (wmId)
 		{
+		case 42:
+			
+			Decode();
+			break;
+
 		case IDM_ABOUT:
 
 			// DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
 
 			// Instead of showing about window, decode
-			Decode();
+			SetupDecoder();
 
 			break;
 		case IDM_EXIT:
+			
+			TeardownDecoder();
+
+			teardown_d3d();
+
 			DestroyWindow(hWnd);
+			
 			break;
 		default:
 			return DefWindowProc(hWnd, message, wParam, lParam);
@@ -614,6 +630,8 @@ const d3d_format_t* getFormat(const AVCodecContext *avctx, GUID *selected) {
 
 
 void CreateOffscreenPlainSurface(int width, int height) {
+
+	if (d9RenderSurface) return;
 	
 	HRESULT hr = d3d9dev->CreateOffscreenPlainSurface(width,
 		height,
@@ -628,6 +646,39 @@ void CreateOffscreenPlainSurface(int width, int height) {
 	}
 
 	printf("CreateOffscreenPlainSurface error\n");
+}
+
+void render_frame(AVFrame *frame) {
+	// AV_PIX_FMT_DXVA2_VLD:
+	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
+	if (frame->data[3] != NULL) {
+		CreateOffscreenPlainSurface(frame->width, frame->height);
+		if (d9RenderSurface) {
+
+			// target rect is the viewport
+			GetClientRect(videoWindow, &targetRect);
+
+			// begin our tiny rendering loop
+			d3d9dev->BeginScene();
+
+			IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
+
+			// This converts nv12 to rgb with rgb data on our render surface
+			// NOTE: render surface must be exactly the SAME SIZE as video frame
+			d3d9dev->StretchRect(surf, NULL, d9RenderSurface, NULL, D3DTEXF_NONE);
+
+			// draw render surface to back buffer
+			IDirect3DSurface9 *backbuf = NULL;
+			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+			d3d9dev->StretchRect(d9RenderSurface, NULL, backbuf, &targetRect, D3DTEXF_LINEAR);
+
+			d3d9dev->EndScene();
+			// end tiny rendering loop
+
+			d3d9dev->Present(NULL, NULL, NULL, NULL);
+		}
+
+	}
 }
 
 
@@ -852,16 +903,20 @@ void log_ffmpeg_error(const char *prefix, int i) {
 	printf("%s. %s\n", prefix, err);
 }
 
-void Decode() {
-	// This is in the project directory (not root directory)
-	const char *video_file = "snip.mp4";
+VOID CALLBACK TimerProc(HWND hWnd, UINT nMsg, UINT nIDEvent, DWORD dwTime) {
+	Decode();
+}
 
+void SetupDecoder() {
 	av_register_all();
 	av_log_set_level(AV_LOG_VERBOSE);
 
+
+	// This is in the project directory (not root directory)
+	const char *video_file = "snip.mp4";
+	
 	printf("Input file: %s\n", video_file);
 
-	AVFormatContext *avFormatCtx = NULL;
 
 	if (avformat_open_input(&avFormatCtx, video_file, NULL, NULL) != 0) {
 		printf("Could not open input file\n");
@@ -875,7 +930,6 @@ void Decode() {
 	}
 
 	int video_index = 0;
-	AVCodecContext *codecCtx = NULL;
 	AVCodec *codec = NULL;
 	AVStream *videoStream = NULL;
 
@@ -883,7 +937,7 @@ void Decode() {
 	if (video_index < 0) {
 		avformat_close_input(&avFormatCtx);
 		printf("Could not find video stream\n");
-		return ;
+		return;
 	}
 
 	videoStream = avFormatCtx->streams[video_index];
@@ -911,7 +965,15 @@ void Decode() {
 
 	av_dump_format(avFormatCtx, 0, video_file, 0);
 
-	printf("Setup complete. Decoding the first frame.\n");
+	printf("Setup complete.\n");
+
+	// use timer to drive decoding loop
+	TimerId = SetTimer(NULL, 0, 30, &TimerProc);
+
+}
+
+void Decode() {
+	if (avFormatCtx == NULL) return;
 
 	AVPacket pkt;
 	av_init_packet(&pkt);
@@ -920,74 +982,45 @@ void Decode() {
 
 	AVFrame *frame = av_frame_alloc();
 
-	bool again = false; // to deal with EAGAIN from avcodec_receive_frame
-	do {
-		again = false;
+	int read_frame = av_read_frame(avFormatCtx, &pkt);
+	if (read_frame >= 0) {
 
-		int read_frame = av_read_frame(avFormatCtx, &pkt);
-		if (read_frame >= 0) {
+		avcodec_send_packet(codecCtx, &pkt);
 
-			avcodec_send_packet(codecCtx, &pkt);
+		int ret = avcodec_receive_frame(codecCtx, frame);
+		if (ret == 0) {
 
-			int ret = avcodec_receive_frame(codecCtx, frame);
-			if (ret == 0) {
+			printf("Successfully decoded a frame.\n");
+			printf("width = %i, height = %i\n", frame->width, frame->height);
 
-				printf("Successfully decoded the first frame.\n");
-				printf("width = %i, height = %i\n", frame->width, frame->height);
+			render_frame(frame);
 
-				// TODO: download nv12 data from gpu and dump to file, or just render
+			Sleep(30); // pretend 30fps video
 
-				break;
-
-			}
-			else {
-				log_ffmpeg_error("avcodec_receive_frame() error", ret);
-
-				again = (AVERROR(ret) == EAGAIN);
-			}
 		}
 		else {
-			log_ffmpeg_error("avcodec_receive_frame() error", read_frame);
+			log_ffmpeg_error("avcodec_receive_frame() error", ret);
 		}
-
-		av_packet_unref(&pkt);
-
-	} while (again);
-
-	// AV_PIX_FMT_DXVA2_VLD:
-	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
-	if (frame->data[3] != NULL) {
-		CreateOffscreenPlainSurface(frame->width, frame->height);
-		if (d9RenderSurface) {
-
-			// target rect is the viewport
-			GetClientRect(videoWindow, &targetRect);
-
-			// begin our tiny rendering loop
-			d3d9dev->BeginScene();
-
-			IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
-			
-			// This converts nv12 to rgb with rgb data on our render surface
-			// NOTE: render surface must be exactly the SAME SIZE as video frame
-			d3d9dev->StretchRect(surf, NULL, d9RenderSurface, NULL, D3DTEXF_NONE);
-
-			// draw render surface to back buffer
-			IDirect3DSurface9 *backbuf = NULL;
-			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
-			d3d9dev->StretchRect(d9RenderSurface, NULL, backbuf, &targetRect, D3DTEXF_LINEAR);
-
-			d3d9dev->EndScene();
-			// end tiny rendering loop
-
-			d3d9dev->Present(NULL, NULL, NULL, NULL);
-		}
-		
 	}
+	else {
+		log_ffmpeg_error("av_read_frame() error", read_frame);
+		
+		// should be EOF, so stop decoding timer
+		// KillTimer(NULL, TimerId);
+
+		// here we just play again
+		av_seek_frame(avFormatCtx, 0, 0, AVSEEK_FLAG_BACKWARD);
+		printf("Starting over...\n");
+	
+	}
+
+	av_packet_unref(&pkt);
 
 	av_frame_free(&frame);
 
+}
 
+void TeardownDecoder() {
 	if (hw_frames_ctx) av_buffer_unref(&hw_frames_ctx);
 	if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
 
@@ -997,5 +1030,4 @@ void Decode() {
 	}
 
 	if (avFormatCtx) avformat_close_input(&avFormatCtx);
-
 }
