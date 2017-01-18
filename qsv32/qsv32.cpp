@@ -22,6 +22,10 @@ IDirect3DDeviceManager9 *d9devmng = NULL;
 IDirectXVideoDecoderService *d9videoservice = NULL;
 HANDLE dxvadev = NULL;
 
+// Renderering Direct3D stuff
+IDirect3DSurface9 *d9RenderSurface = NULL;
+RECT targetRect;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -33,6 +37,8 @@ void setup_d3d();
 void teardown_d3d();
 void ClearD3DBackground();
 void CheckSupportedCodecs();
+void CheckD3D9ColorConversion();
+void CreateOffscreenPlainSurface(int width, int height);
 
 void Decode();
 
@@ -73,6 +79,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	if (dxvadev != NULL) {
 
 		ClearD3DBackground();
+		CheckD3D9ColorConversion();
 		CheckSupportedCodecs();
 
 	}
@@ -294,7 +301,7 @@ void setup_d3d() {
 	d3dpp.BackBufferHeight = 0;
 	d3dpp.EnableAutoDepthStencil = FALSE;
 
-	DWORD flags = D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED;
+	DWORD flags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED;
 
 	if (pD3D->CreateDevice(D3DADAPTER_DEFAULT,
 		D3DDEVTYPE_HAL,
@@ -335,6 +342,27 @@ void setup_d3d() {
 	printf("Successfully setup D3D contexts for decoding acceleration\n");
 }
 
+void CheckD3D9ColorConversion() {
+	// We want to let D3D9 convert NV12 to RGB so we can display
+	HRESULT hr = pD3D->CheckDeviceFormatConversion(D3DADAPTER_DEFAULT,
+		D3DDEVTYPE_HAL, 
+		(D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'),
+		D3DFMT_X8R8G8B8);
+
+	if (hr == D3D_OK) {
+		printf("NV12 color conversion is supported.\n");
+		return;
+	}
+
+	if (hr == D3DERR_INVALIDCALL) {
+		printf("CheckDeviceFormatConversion failed.\n");
+	}
+	else if (hr == D3DERR_NOTAVAILABLE) {
+		printf("The hardware does not support conversion between NV12 and X8R8G8B8.\n");
+	}
+
+}
+
 HRESULT CreateD3DDeviceManager(
 	IDirect3DDevice9 *pDevice,
 	UINT *pReset,
@@ -367,6 +395,10 @@ HRESULT CreateD3DDeviceManager(
 
 void teardown_d3d()
 {
+	if (d9RenderSurface) {
+		d9RenderSurface->Release();
+	}
+
 	if (dxvadev) {
 		d9devmng->CloseDeviceHandle(dxvadev);
 		dxvadev = NULL;
@@ -576,6 +608,26 @@ const d3d_format_t* getFormat(const AVCodecContext *avctx, GUID *selected) {
 
 	return NULL;
 }
+
+
+
+
+void CreateOffscreenPlainSurface(int width, int height) {
+	
+	HRESULT hr = d3d9dev->CreateOffscreenPlainSurface(width,
+		height,
+		(D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'),
+		D3DPOOL_DEFAULT,
+		&d9RenderSurface,
+		NULL);
+
+	if (hr == D3D_OK) {
+		printf("Created offscreen plain surface for rendering\n");
+	}
+
+	printf("CreateOffscreenPlainSurface error\n");
+}
+
 
 
 //
@@ -899,6 +951,37 @@ void Decode() {
 		av_packet_unref(&pkt);
 
 	} while (again);
+
+	// AV_PIX_FMT_DXVA2_VLD:
+	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
+	if (frame->data[3] != NULL) {
+		CreateOffscreenPlainSurface(frame->width, frame->height);
+		if (d9RenderSurface) {
+
+			// target rect is the viewport
+			GetClientRect(videoWindow, &targetRect);
+
+			// begin our tiny rendering loop
+			d3d9dev->BeginScene();
+
+			IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
+			
+			// This converts nv12 to rgb with rgb data on our render surface
+			// NOTE: render surface must be exactly the SAME SIZE as video frame
+			d3d9dev->StretchRect(surf, NULL, d9RenderSurface, NULL, D3DTEXF_NONE);
+
+			// draw render surface to back buffer
+			IDirect3DSurface9 *backbuf = NULL;
+			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+			d3d9dev->StretchRect(d9RenderSurface, NULL, backbuf, &targetRect, D3DTEXF_LINEAR);
+
+			d3d9dev->EndScene();
+			// end tiny rendering loop
+
+			d3d9dev->Present(NULL, NULL, NULL, NULL);
+		}
+		
+	}
 
 	av_frame_free(&frame);
 
