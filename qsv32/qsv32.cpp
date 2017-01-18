@@ -96,6 +96,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		}
 	}
 
+	teardown_d3d();
 
 	return (int)msg.wParam;
 }
@@ -404,14 +405,14 @@ void teardown_d3d()
 		dxvadev = NULL;
 	}
 
-	if (d9devmng) {
-		d9devmng->Release();
-		d9devmng = NULL;
-	}
-
 	if (d9videoservice) {
 		d9videoservice->Release();
 		d9videoservice = NULL;
+	}
+
+	if (d9devmng) {
+		d9devmng->Release();
+		d9devmng = NULL;
 	}
 
 	if (d3d9dev) {
@@ -623,6 +624,7 @@ void CreateOffscreenPlainSurface(int width, int height) {
 
 	if (hr == D3D_OK) {
 		printf("Created offscreen plain surface for rendering\n");
+		return;
 	}
 
 	printf("CreateOffscreenPlainSurface error\n");
