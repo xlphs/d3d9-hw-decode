@@ -119,7 +119,7 @@ void ClearD3DBackground() {
 	HRESULT hr;
 
 	//Colour to clear background
-	DWORD colour = 0xFF00BB33;
+	DWORD colour = 0xFF000000;
 
 	//Clear the buffer to our new colour.
 	hr = d3d9dev->Clear(0,  //Number of rectangles to clear, we're clearing everything so set it to 0
@@ -130,7 +130,7 @@ void ClearD3DBackground() {
 		0);   //Stencil clear value, again, we don't have one, this value doesn't matter
 
 	if (FAILED(hr)) {
-		printf("Clear failed");
+		printf("Clear failed\n");
 		return;
 	}
 
@@ -225,7 +225,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		switch (wmId)
 		{
 		case 42:
-			
+
 			Decode();
 			break;
 
@@ -238,13 +238,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 			break;
 		case IDM_EXIT:
-			
+
 			TeardownDecoder();
 
 			teardown_d3d();
 
 			DestroyWindow(hWnd);
-			
+
 			break;
 		default:
 			return DefWindowProc(hWnd, message, wParam, lParam);
@@ -262,6 +262,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 		PostQuitMessage(0);
 		break;
+
+	case WM_EXITSIZEMOVE:
+		ClearD3DBackground();
+		break;
+
 	default:
 		return DefWindowProc(hWnd, message, wParam, lParam);
 	}
@@ -303,20 +308,24 @@ void setup_d3d() {
 		printf("IDirect3D9_GetAdapterIdentifier failed\n");
 	}
 
-	/* Parameters copied from VLC */
 	D3DPRESENT_PARAMETERS d3dpp;
 	ZeroMemory(&d3dpp, sizeof(D3DPRESENT_PARAMETERS));
 	d3dpp.Flags = D3DPRESENTFLAG_VIDEO;
-	d3dpp.Windowed = TRUE;
-	d3dpp.hDeviceWindow = NULL;
+	d3dpp.Windowed = TRUE; // required for color conversion
+	d3dpp.hDeviceWindow = videoWindow;
 	d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
 	d3dpp.MultiSampleType = D3DMULTISAMPLE_NONE;
 	d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_DEFAULT;
-	d3dpp.BackBufferCount = 0;                  /* FIXME what to put here */
-	d3dpp.BackBufferFormat = D3DFMT_X8R8G8B8;    /* FIXME what to put here */
-	d3dpp.BackBufferWidth = 0;
-	d3dpp.BackBufferHeight = 0;
+	d3dpp.BackBufferCount = 1;
+	d3dpp.BackBufferFormat = D3DFMT_X8R8G8B8; /* D3DFMT_UNKNOWN or D3DFMT_X8R8G8B8 */
 	d3dpp.EnableAutoDepthStencil = FALSE;
+
+	// use maximum screen resolution so we don't have to change back buffer size
+	// when window resizes
+	// FIXME: we should get the resolution properly, for now just use 1920x1080
+	// https://msdn.microsoft.com/en-us/library/windows/desktop/ff476878(v=vs.85).aspx
+	d3dpp.BackBufferWidth = 1920;
+	d3dpp.BackBufferHeight = 1080;
 
 	DWORD flags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED;
 
@@ -655,9 +664,6 @@ void render_frame(AVFrame *frame) {
 		CreateOffscreenPlainSurface(frame->width, frame->height);
 		if (d9RenderSurface) {
 
-			// target rect is the viewport
-			GetClientRect(videoWindow, &targetRect);
-
 			// begin our tiny rendering loop
 			d3d9dev->BeginScene();
 
@@ -670,9 +676,10 @@ void render_frame(AVFrame *frame) {
 			// draw render surface to back buffer
 			IDirect3DSurface9 *backbuf = NULL;
 			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+
 			RECT frameRect = { 0, 0, frame->width, frame->height };
 			d3d9dev->StretchRect(d9RenderSurface, &frameRect,
-				backbuf, &targetRect, D3DTEXF_LINEAR);
+				backbuf, NULL, D3DTEXF_LINEAR);
 
 			d3d9dev->EndScene();
 			// end tiny rendering loop
@@ -816,10 +823,6 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 		av_buffer_unref(&hw_frames_ctx);
 		return false;
 	}
-
-	// Do we need to keep a copy of these?
-	//ctx->decoder_guid   = device_guid;
-	//ctx->decoder_config = config;
 
 	dxva_ctx->cfg = &config;
 	dxva_ctx->decoder = frames_hwctx->decoder_to_release;
