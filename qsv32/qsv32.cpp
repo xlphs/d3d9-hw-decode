@@ -14,6 +14,11 @@ WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 HWND videoWindow;																// le D3D video window
 
+enum {
+	ID_SNAPSHOT = 99,
+	ID_PLAYVIDEO
+};
+
 // The Direct3D stuff
 IDirect3D9 *pD3D = NULL;
 IDirect3DDevice9 *d3d9dev = NULL;
@@ -33,6 +38,9 @@ UINT TimerId = 0;
 LPDIRECT3DSURFACE9 *dxva2_surfaces = NULL;
 unsigned dxva2_surfaces_count = 0;
 
+// For gpu download
+bool download_from_gpu = false;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -50,6 +58,7 @@ void CreateOffscreenPlainSurface(int width, int height);
 void SetupDecoder();
 void Decode();
 void TeardownDecoder();
+int extract_frame(AVFrame *src, AVFrame *dest);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/bb970490(v=vs.85).aspx
 HRESULT CreateD3DDeviceManager(
@@ -175,6 +184,14 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
 	return RegisterClassExW(&wcex);
 }
 
+#define ADDPOPUPMENU(hmenu, string) \
+    HMENU hSubMenu = CreatePopupMenu(); \
+    AppendMenu(hmenu, MF_STRING | MF_POPUP, (UINT)hSubMenu, string);
+
+// Add a menu item
+#define ADDMENUITEM(hmenu, ID, string) \
+    AppendMenu(hSubMenu, MF_STRING, ID, string);
+
 //
 //   FUNCTION: InitInstance(HINSTANCE, int)
 //
@@ -199,6 +216,10 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
 	ShowWindow(hWnd, nCmdShow);
 	UpdateWindow(hWnd);
+
+	HMENU defaultMenu = GetMenu(hWnd);
+	AppendMenu(defaultMenu, MF_STRING, ID_PLAYVIDEO, L"Play");
+	AppendMenu(defaultMenu, MF_STRING, ID_SNAPSHOT, L"Snapshot");
 
 	videoWindow = hWnd;
 
@@ -227,17 +248,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		switch (wmId)
 		{
 		case 42:
-
 			Decode();
 			break;
-
-		case IDM_ABOUT:
-
-			// DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-
-			// Instead of showing about window, decode
+		case ID_PLAYVIDEO:
 			SetupDecoder();
-
+			break;
+		case ID_SNAPSHOT:
+			download_from_gpu = true;
+			printf("Next decoded frame will be downloaded from CPU\n");
+			break;
+		case IDM_ABOUT:
+			DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
 			break;
 		case IDM_EXIT:
 
@@ -673,6 +694,7 @@ void render_frame(AVFrame *frame) {
 	// AV_PIX_FMT_DXVA2_VLD:
 	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
 	if (frame->data[3] != NULL) {
+		/*
 		CreateOffscreenPlainSurface(frame->width, frame->height);
 		if (d9RenderSurface) {
 
@@ -698,6 +720,17 @@ void render_frame(AVFrame *frame) {
 
 			d3d9dev->Present(NULL, NULL, NULL, NULL);
 		}
+		*/
+
+
+		// draw directly to back buffer
+		IDirect3DSurface9 *backbuf = NULL;
+		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+
+		IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
+		d3d9dev->StretchRect(surf, NULL, backbuf, NULL, D3DTEXF_LINEAR);
+
+		d3d9dev->Present(NULL, NULL, NULL, NULL);
 
 	}
 }
@@ -992,6 +1025,41 @@ void SetupDecoder() {
 
 }
 
+// http://stackoverflow.com/questions/35797904/writing-decoded-yuv420p-data-into-a-file-with-ffmpeg
+// To convert yuv into jpeg
+// ffmpeg -s 1280x720 -pix_fmt yuv420p -i snap.yuv snap.jpg
+void SaveYUVFrame(const char *file, AVFrame *avFrame)
+{
+	FILE *fDump = fopen(file, "wb");
+
+	uint32_t pitchY = avFrame->linesize[0];
+	uint32_t pitchU = avFrame->linesize[1];
+	uint32_t pitchV = avFrame->linesize[2];
+
+	uint8_t *avY = avFrame->data[0];
+	// not sure if we copied data wrong or what, but V and U are swapped
+	// surface description does indeed report NV12 surface
+	uint8_t *avV = avFrame->data[1];
+	uint8_t *avU = avFrame->data[2];
+
+	for (uint32_t i = 0; i < avFrame->height; i++) {
+		fwrite(avY, avFrame->width, 1, fDump);
+		avY += pitchY;
+	}
+
+	for (uint32_t i = 0; i < avFrame->height / 2; i++) {
+		fwrite(avU, avFrame->width / 2, 1, fDump);
+		avU += pitchU;
+	}
+
+	for (uint32_t i = 0; i < avFrame->height / 2; i++) {
+		fwrite(avV, avFrame->width / 2, 1, fDump);
+		avV += pitchV;
+	}
+
+	fclose(fDump);
+}
+
 void Decode() {
 	if (avFormatCtx == NULL) return;
 
@@ -1036,6 +1104,28 @@ void Decode() {
 
 	av_packet_unref(&pkt);
 
+
+	if (download_from_gpu) {
+		download_from_gpu = false;
+
+		AVFrame *yuvframe = av_frame_alloc();
+		int numBytes = avpicture_get_size(AV_PIX_FMT_YUV420P, codecCtx->width, codecCtx->height);
+		uint8_t *dataBuf = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
+		yuvframe->width = codecCtx->width;
+		yuvframe->height = codecCtx->height;
+		avpicture_fill((AVPicture *)yuvframe, dataBuf, AV_PIX_FMT_YUV420P, codecCtx->width, codecCtx->height);
+
+		if (extract_frame(frame, yuvframe) == 0) {
+			printf("Successfully downloaded data from GPU\n");
+			SaveYUVFrame("snap.yuv", yuvframe);
+			printf("Wrote YUV data to snap.yuv\n");
+		}
+		else {
+			printf("Failed to download nv12 data from GPU\n");
+		}
+		av_frame_free(&yuvframe);
+	}
+
 	av_frame_free(&frame);
 
 }
@@ -1047,14 +1137,110 @@ void TeardownDecoder() {
 		}
 	}
 
-	// ffmpeg should have freed these, trying to free them will cause segfault
-	//if (hw_frames_ctx) av_buffer_unref(&hw_frames_ctx);
-	//if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
-
 	if (codecCtx) {
-		// if (codecCtx->hwaccel_context) av_freep(&codecCtx->hwaccel_context);
 		avcodec_free_context(&codecCtx);
 	}
 
 	if (avFormatCtx) avformat_close_input(&avFormatCtx);
+}
+
+
+
+/* Some simple copy helper functions */
+static void CopyPlane(uint8_t *dst, size_t dst_pitch,
+                      const uint8_t *src, size_t src_pitch,
+                      unsigned width, unsigned height)
+{
+    unsigned y;
+    for (y = 0; y < height; y++) {
+        memcpy(dst, src, width);
+        src += src_pitch;
+        dst += dst_pitch;
+    }
+}
+
+static void SplitPlanes(uint8_t *dstu, size_t dstu_pitch,
+                        uint8_t *dstv, size_t dstv_pitch,
+                        const uint8_t *src, size_t src_pitch,
+                        unsigned width, unsigned height)
+{
+    unsigned x,y;
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            dstu[x] = src[2*x+0];
+            dstv[x] = src[2*x+1];
+        }
+        src  += src_pitch;
+        dstu += dstu_pitch;
+        dstv += dstv_pitch;
+    }
+}
+
+static void CopyFromNv12(AVFrame *dst, uint8_t *src[2], size_t src_pitch[2],
+                  unsigned width, unsigned height)
+{
+    CopyPlane(dst->data[0], dst->linesize[0],
+              src[0], src_pitch[0],
+              width, height);
+    SplitPlanes(dst->data[2], dst->linesize[2],
+                dst->data[1], dst->linesize[1],
+                src[1], src_pitch[1],
+                width/2, height/2);
+}
+
+// Downloads NV12 surface from GPU into CPU, saves as YUV
+int extract_frame(AVFrame *src, AVFrame *dest) {
+	LPDIRECT3DSURFACE9 surface = (LPDIRECT3DSURFACE9)(uintptr_t)src->data[3];
+	if (!surface) return 1;
+
+	D3DSURFACE_DESC surface_desc;
+	IDirect3DSurface9_GetDesc(surface, &surface_desc);
+
+	if (surface_desc.Format == MAKEFOURCC('N', 'V', '1', '2')) {
+		printf("NV12 is the input format\n");
+	}
+	else if (surface_desc.Format == MAKEFOURCC('N', 'V', '2', '1')) {
+		printf("NV21 is the input format\n");
+	}
+	else if (surface_desc.Format == MAKEFOURCC('Y', 'V', '1', '2')) {
+		printf("YV12 is the input format\n");
+	}
+	else if (surface_desc.Format == MAKEFOURCC('I', 'M', 'C', '3')) {
+		printf("IMC3 is the input format, NOT SUPPORTED\n");
+		return 1;
+	}
+	else if (surface_desc.Format == MAKEFOURCC('P', '0', '1', '0')) {
+		printf("P010 is the input format, NOT SUPPORTED\n");
+		return 1;
+	}
+	else if (surface_desc.Format == MAKEFOURCC('P', '0', '1', '6')) {
+		printf("P016 is the input format, NOT SUPPORTED\n");
+		return 1;
+	}
+	else {
+		printf("UKNOWN Unsupported format\n");
+		return 1;
+	}
+
+	D3DLOCKED_RECT lock;
+	HRESULT hr = IDirect3DSurface9_LockRect(surface, &lock, NULL, D3DLOCK_READONLY);
+	if (FAILED(hr)) {
+		printf("Unable to lock DXVA2 surface\n");
+		return 2;
+  }
+
+	uint8_t *plane[2] = {
+		(uint8_t*)lock.pBits,
+      (uint8_t*)lock.pBits + lock.Pitch * surface_desc.Height
+  };
+  size_t  pitch[2] = {
+      lock.Pitch,
+      lock.Pitch,
+  };
+
+  CopyFromNv12(dest, plane, pitch, src->width, src->height);
+
+	IDirect3DSurface9_UnlockRect(surface);
+
+	return 0;
 }
