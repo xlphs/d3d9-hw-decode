@@ -695,7 +695,8 @@ void render_frame(AVFrame *frame) {
 		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
 
 		IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
-		d3d9dev->StretchRect(surf, NULL, backbuf, NULL, D3DTEXF_LINEAR);
+		RECT src = { 0, 0, frame->width, frame->height};
+		d3d9dev->StretchRect(surf, &src, backbuf, NULL, D3DTEXF_LINEAR);
 
 		//d3d9dev->Present(NULL, NULL, NULL, NULL);
 
@@ -712,7 +713,8 @@ void render_frame(AVFrame *frame, const RECT *rect) {
 		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
 
 		IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
-		d3d9dev->StretchRect(surf, NULL, backbuf, rect, D3DTEXF_LINEAR);
+		RECT src = { 0, 0, frame->width, frame->height};
+		d3d9dev->StretchRect(surf, &src, backbuf, rect, D3DTEXF_LINEAR);
 
 		d3d9dev->Present(NULL, NULL, NULL, NULL);
 
@@ -958,7 +960,8 @@ void log_ffmpeg_error(const char *prefix, int i) {
 void SetupDecoder() {
 
 	// This is in the project directory (not root directory)
-	const char *video_file = "snip.mp4";
+	// const char *video_file = "snip.mp4";
+	const char *video_file = "C:\\Users\\marica\\Videos\\hevc\\hevc_test.mp4";
 	
 	printf("Input file: %s\n", video_file);
 
@@ -1330,12 +1333,21 @@ void Decode2() {
 		if (ret == 0) {
 
 			// printf("Successfully decoded a frame.\n");
-			printf("width = %i, height = %i\n", frame->width, frame->height);
+			//printf("width = %i, height = %i\n", frame->width, frame->height);
 
-			RECT rect;
-			GetClientRect(videoWindow, &rect);
-			rect.top = rect.bottom - 369;
-			rect.left = rect.right - 250;
+			int screenWidth = 1920;
+			int screenHeight = 1080;
+
+			// put sub video as the 9th in a 3x3 grid
+			int channelWidth = screenWidth / 3;
+			int channelHeight = screenHeight / 3;
+			int x = channelWidth * 2;
+			int y = channelHeight * 2;
+
+			RECT rect = { x, y, x + channelWidth, y + channelHeight};
+			// GetClientRect(videoWindow, &rect);
+			// rect.top = rect.bottom - 400;
+			// rect.left = rect.right - 250;
 			render_frame(frame, &rect);
 
 		}
