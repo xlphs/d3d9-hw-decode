@@ -35,8 +35,6 @@ RECT targetRect;
 AVFormatContext *avFormatCtx = NULL;
 AVCodecContext *codecCtx = NULL;
 UINT TimerId = 0;
-LPDIRECT3DSURFACE9 *dxva2_surfaces = NULL;
-unsigned dxva2_surfaces_count = 0;
 
 // For gpu download
 bool download_from_gpu = false;
@@ -44,8 +42,6 @@ bool download_from_gpu = false;
 //FFmpeg decoder for secondary video (1 timer updates both)
 AVFormatContext *avFormatCtx2 = NULL;
 AVCodecContext *codecCtx2 = NULL;
-LPDIRECT3DSURFACE9 *dxva2_surfaces2 = NULL;
-unsigned dxva2_surfaces_count2 = 0;
 
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -59,7 +55,6 @@ void teardown_d3d();
 void ClearD3DBackground();
 void CheckSupportedCodecs();
 void CheckD3D9ColorConversion();
-void CreateOffscreenPlainSurface(int width, int height);
 
 void SetupDecoder();
 void Decode();
@@ -98,6 +93,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		return FALSE;
 	}
 
+
 	HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_QSV32));
 
 	AddConsole();
@@ -110,6 +106,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		CheckSupportedCodecs();
 
 	}
+
+	av_register_all();
+	av_log_set_level(AV_LOG_VERBOSE);
 
 	MSG msg;
 
@@ -256,11 +255,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		// Parse the menu selections:
 		switch (wmId)
 		{
-		case 42:
-			Decode();
-			break;
 		case ID_PLAYVIDEO:
 			SetupDecoder();
+			SetupDecoder2();
 			break;
 		case ID_SNAPSHOT:
 			download_from_gpu = true;
@@ -272,6 +269,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case IDM_EXIT:
 
 			TeardownDecoder();
+			TeardownDecoder2();
 
 			teardown_d3d();
 
@@ -294,6 +292,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 
 		TeardownDecoder();
+		TeardownDecoder2();
 
 		teardown_d3d();
 
@@ -330,6 +329,13 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 	return (INT_PTR)FALSE;
 }
 
+
+// Timer callback
+VOID CALLBACK TimerProc(HWND hWnd, UINT nMsg, UINT nIDEvent, DWORD dwTime) {
+	Decode();
+	Decode2();
+	Sleep(30); // pretend 30 fps
+}
 
 
 void setup_d3d() {
@@ -569,7 +575,7 @@ int fourccFor(const GUID *guid)
 void CheckSupportedCodecs() {
 	if (d9videoservice == NULL) return;
 
-	/* Retreive supported modes from the decoder service */
+	/* Retrieve supported modes from the decoder service */
 
 	unsigned input_count;
 	GUID *input_list = NULL;
@@ -679,58 +685,10 @@ const d3d_format_t* getFormat(const AVCodecContext *avctx, GUID *selected) {
 
 
 
-
-void CreateOffscreenPlainSurface(int width, int height) {
-
-	if (d9RenderSurface) return;
-	
-	HRESULT hr = d3d9dev->CreateOffscreenPlainSurface(width,
-		height,
-		(D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'),
-		D3DPOOL_DEFAULT,
-		&d9RenderSurface,
-		NULL);
-
-	if (hr == D3D_OK) {
-		printf("Created offscreen plain surface for rendering\n");
-		return;
-	}
-
-	printf("CreateOffscreenPlainSurface error\n");
-}
-
 void render_frame(AVFrame *frame) {
 	// AV_PIX_FMT_DXVA2_VLD:
 	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
 	if (frame->data[3] != NULL) {
-		/*
-		CreateOffscreenPlainSurface(frame->width, frame->height);
-		if (d9RenderSurface) {
-
-			// begin our tiny rendering loop
-			d3d9dev->BeginScene();
-
-			IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
-
-			// This converts nv12 to rgb with rgb data on our render surface
-			// NOTE: render surface must be exactly the SAME SIZE as video frame
-			d3d9dev->StretchRect(surf, NULL, d9RenderSurface, NULL, D3DTEXF_NONE);
-
-			// draw render surface to back buffer
-			IDirect3DSurface9 *backbuf = NULL;
-			d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
-
-			RECT frameRect = { 0, 0, frame->width, frame->height };
-			d3d9dev->StretchRect(d9RenderSurface, &frameRect,
-				backbuf, NULL, D3DTEXF_LINEAR);
-
-			d3d9dev->EndScene();
-			// end tiny rendering loop
-
-			d3d9dev->Present(NULL, NULL, NULL, NULL);
-		}
-		*/
-
 
 		// draw directly to back buffer
 		IDirect3DSurface9 *backbuf = NULL;
@@ -738,6 +696,23 @@ void render_frame(AVFrame *frame) {
 
 		IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
 		d3d9dev->StretchRect(surf, NULL, backbuf, NULL, D3DTEXF_LINEAR);
+
+		//d3d9dev->Present(NULL, NULL, NULL, NULL);
+
+	}
+}
+
+void render_frame(AVFrame *frame, const RECT *rect) {
+	// AV_PIX_FMT_DXVA2_VLD:
+	// HW decoding through DXVA2, Picture.data[3] contains a IDirect3DSurface9*
+	if (frame->data[3] != NULL) {
+
+		// draw directly to back buffer
+		IDirect3DSurface9 *backbuf = NULL;
+		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+
+		IDirect3DSurface9 *surf = (IDirect3DSurface9*)(uintptr_t)frame->data[3];
+		d3d9dev->StretchRect(surf, NULL, backbuf, rect, D3DTEXF_LINEAR);
 
 		d3d9dev->Present(NULL, NULL, NULL, NULL);
 
@@ -872,9 +847,6 @@ bool dxva2_create_decoder(AVCodecContext *s,
 		return false;
 	}
 
-	dxva2_surfaces = frames_hwctx->surfaces;
-	dxva2_surfaces_count = frames_hwctx->nb_surfaces;
-
 	dxva_ctx->cfg = &config;
 	dxva_ctx->decoder = frames_hwctx->decoder_to_release;
 	dxva_ctx->surface = frames_hwctx->surfaces;
@@ -906,6 +878,16 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	const enum AVPixelFormat *in_fmts)
 {
 	AVPixelFormat fmt = AV_PIX_FMT_DXVA2_VLD;
+
+	if (s == codecCtx) {
+		printf("ffmpeg_GetFormat callback for primary video\n");
+	} else if (s == codecCtx2) {
+		printf("ffmpeg_GetFormat callback for secondary video\n");
+	}
+	else {
+		printf("ffmpeg_GetFormat callback for unknown video.......\n");
+		return AV_PIX_FMT_NONE;
+	}
 
 	AVBufferRef *hw_device_ctx = NULL;
 	AVBufferRef *hw_frames_ctx = NULL;
@@ -940,16 +922,16 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 		return AV_PIX_FMT_NONE;
 	}
 
-	printf("Successfully created DXVA2 decoder.\n");
-
 	const AVPixFmtDescriptor *dsc = av_pix_fmt_desc_get(fmt);
 	printf("Trying decoder %s\n", dsc->name);
 
 	// pointer comparison to find out which decoder we are working with
 	if (s == codecCtx) {
 		global_frames_ctx = hw_frames_ctx;
+		printf("Successfully created DXVA2 decoder.\n");
 	} else if (s == codecCtx2) {
 		global_frames_ctx2 = hw_frames_ctx;
+		printf("Successfully created DXVA2 decoder for secondary video\n");
 	}
 
 	return fmt;
@@ -973,14 +955,7 @@ void log_ffmpeg_error(const char *prefix, int i) {
 	printf("%s. %s\n", prefix, err);
 }
 
-VOID CALLBACK TimerProc(HWND hWnd, UINT nMsg, UINT nIDEvent, DWORD dwTime) {
-	Decode();
-}
-
 void SetupDecoder() {
-	av_register_all();
-	av_log_set_level(AV_LOG_VERBOSE);
-
 
 	// This is in the project directory (not root directory)
 	const char *video_file = "snip.mp4";
@@ -1095,12 +1070,10 @@ void Decode() {
 		int ret = avcodec_receive_frame(codecCtx, frame);
 		if (ret == 0) {
 
-			printf("Successfully decoded a frame.\n");
-			printf("width = %i, height = %i\n", frame->width, frame->height);
+			// printf("Successfully decoded a frame.\n");
+			// printf("width = %i, height = %i\n", frame->width, frame->height);
 
 			render_frame(frame);
-
-			Sleep(30); // pretend 30fps video
 
 		}
 		else {
@@ -1148,9 +1121,20 @@ void Decode() {
 }
 
 void TeardownDecoder() {
-	if (dxva2_surfaces_count) {
-		for (unsigned i = 0; i < dxva2_surfaces_count; i++) {
-			dxva2_surfaces[i]->Release();
+	if (global_frames_ctx) {
+		AVDXVA2FramesContext *frames_hwctx;
+		AVHWFramesContext *frames_ctx;
+		LPDIRECT3DSURFACE9 *dxva2_surfaces = NULL;
+
+		frames_ctx = (AVHWFramesContext*)global_frames_ctx->data;
+		frames_hwctx = (AVDXVA2FramesContext *)frames_ctx->hwctx;
+
+		dxva2_surfaces = frames_hwctx->surfaces;
+		unsigned dxva2_surfaces_count = frames_hwctx->nb_surfaces;
+		if (dxva2_surfaces_count) {
+			for (unsigned i = 0; i < dxva2_surfaces_count; i++) {
+				dxva2_surfaces[i]->Release();
+			}
 		}
 	}
 
@@ -1260,4 +1244,144 @@ int extract_frame(AVFrame *src, AVFrame *dest) {
 	IDirect3DSurface9_UnlockRect(surface);
 
 	return 0;
+}
+
+
+void SetupDecoder2() {
+	// This is in the project directory (not root directory)
+	const char *video_file = "sub.mp4";
+	
+	printf("Input file: %s\n", video_file);
+
+
+	if (avformat_open_input(&avFormatCtx2, video_file, NULL, NULL) != 0) {
+		printf("Could not open input file\n");
+		return;
+	}
+
+	if (avformat_find_stream_info(avFormatCtx2, NULL) < 0) {
+		avformat_close_input(&avFormatCtx2);
+		printf("Could not find stream information\n");
+		return;
+	}
+
+	int video_index = 0;
+	AVCodec *codec = NULL;
+	AVStream *videoStream = NULL;
+
+	video_index = av_find_best_stream(avFormatCtx2, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+	if (video_index < 0) {
+		avformat_close_input(&avFormatCtx2);
+		printf("Could not find video stream\n");
+		return;
+	}
+
+	videoStream = avFormatCtx2->streams[video_index];
+	codec = avcodec_find_decoder(videoStream->codecpar->codec_id);
+	if (!codec) {
+		avformat_close_input(&avFormatCtx2);
+		printf("Could not find video codec\n");
+		return;
+	}
+
+	codecCtx2 = avcodec_alloc_context3(codec);
+	avcodec_parameters_to_context(codecCtx2, videoStream->codecpar);
+
+	// set callbacks (requires LIBAVCODEC_VERSION_MAJOR >= 55)
+	codecCtx2->get_format = ffmpeg_GetFormat;
+	codecCtx2->get_buffer2 = ffmpeg_GetFrameBuf;
+	codecCtx2->opaque = NULL;
+
+	if (avcodec_open2(codecCtx2, codec, NULL) < 0) {
+		avcodec_free_context(&codecCtx2);
+		avformat_close_input(&avFormatCtx2);
+		printf("avcodec_open2 err\n");
+		return;
+	}
+
+	av_dump_format(avFormatCtx2, 0, video_file, 0);
+
+	printf("Setup complete for secondary decoder.\n");
+
+	// primary video starts the timer
+	// use timer to drive decoding loop
+	//TimerId = SetTimer(NULL, 0, 30, &TimerProc);
+}
+
+void Decode2() {
+	if (avFormatCtx2 == NULL) {
+		printf("avFormatCtx2 is nullptr\n");
+		return;
+	}
+
+	AVPacket pkt;
+	av_init_packet(&pkt);
+	pkt.data = NULL;
+	pkt.size = 0;
+
+	AVFrame *frame = av_frame_alloc();
+
+	int read_frame = av_read_frame(avFormatCtx2, &pkt);
+	if (read_frame >= 0) {
+
+		avcodec_send_packet(codecCtx2, &pkt);
+
+		int ret = avcodec_receive_frame(codecCtx2, frame);
+		if (ret == 0) {
+
+			// printf("Successfully decoded a frame.\n");
+			printf("width = %i, height = %i\n", frame->width, frame->height);
+
+			RECT rect;
+			GetClientRect(videoWindow, &rect);
+			rect.top = rect.bottom - 369;
+			rect.left = rect.right - 250;
+			render_frame(frame, &rect);
+
+		}
+		else {
+			log_ffmpeg_error("avcodec_receive_frame() error", ret);
+		}
+	}
+	else {
+		log_ffmpeg_error("av_read_frame() error", read_frame);
+		
+		// should be EOF, so stop decoding timer
+		// KillTimer(NULL, TimerId);
+
+		// here we just play again
+		av_seek_frame(avFormatCtx2, 0, 0, AVSEEK_FLAG_BACKWARD);
+		printf("Starting over...\n");
+	
+	}
+
+	av_packet_unref(&pkt);
+
+	av_frame_free(&frame);
+
+}
+
+void TeardownDecoder2() {
+	if (global_frames_ctx2) {
+		AVDXVA2FramesContext *frames_hwctx;
+		AVHWFramesContext *frames_ctx;
+		LPDIRECT3DSURFACE9 *dxva2_surfaces = NULL;
+
+		frames_ctx = (AVHWFramesContext*)global_frames_ctx2->data;
+		frames_hwctx = (AVDXVA2FramesContext *)frames_ctx->hwctx;
+
+		dxva2_surfaces = frames_hwctx->surfaces;
+		unsigned dxva2_surfaces_count = frames_hwctx->nb_surfaces;
+		if (dxva2_surfaces_count) {
+			for (unsigned i = 0; i < dxva2_surfaces_count; i++) {
+				dxva2_surfaces[i]->Release();
+			}
+		}
+	}
+
+	if (codecCtx2) {
+		avcodec_free_context(&codecCtx2);
+	}
+
+	if (avFormatCtx2) avformat_close_input(&avFormatCtx2);
 }
