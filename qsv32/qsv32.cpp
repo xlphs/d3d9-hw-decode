@@ -315,6 +315,13 @@ void setup_d3d() {
 		printf("IDirect3D9_GetAdapterIdentifier failed\n");
 	}
 
+	D3DDISPLAYMODE dmode;
+	if (pD3D->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &dmode) != D3D_OK) {
+		printf("IDirect3D9_GetAdapterDisplayMode failed, will use 1920x1080 for backbuffer size\n");
+		dmode.Width = 1920;
+		dmode.Height = 1080;
+	}
+
 	D3DPRESENT_PARAMETERS d3dpp;
 	ZeroMemory(&d3dpp, sizeof(D3DPRESENT_PARAMETERS));
 	d3dpp.Flags = D3DPRESENTFLAG_VIDEO;
@@ -329,10 +336,8 @@ void setup_d3d() {
 
 	// use maximum screen resolution so we don't have to change back buffer size
 	// when window resizes
-	// FIXME: we should get the resolution properly, for now just use 1920x1080
-	// https://msdn.microsoft.com/en-us/library/windows/desktop/ff476878(v=vs.85).aspx
-	d3dpp.BackBufferWidth = 1920;
-	d3dpp.BackBufferHeight = 1080;
+	d3dpp.BackBufferWidth = dmode.Width;
+	d3dpp.BackBufferHeight = dmode.Height;
 
 	DWORD flags = D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED;
 
