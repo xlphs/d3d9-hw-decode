@@ -41,6 +41,12 @@ unsigned dxva2_surfaces_count = 0;
 // For gpu download
 bool download_from_gpu = false;
 
+//FFmpeg decoder for secondary video (1 timer updates both)
+AVFormatContext *avFormatCtx2 = NULL;
+AVCodecContext *codecCtx2 = NULL;
+LPDIRECT3DSURFACE9 *dxva2_surfaces2 = NULL;
+unsigned dxva2_surfaces_count2 = 0;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -59,6 +65,9 @@ void SetupDecoder();
 void Decode();
 void TeardownDecoder();
 int extract_frame(AVFrame *src, AVFrame *dest);
+void SetupDecoder2();
+void Decode2();
+void TeardownDecoder2();
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/bb970490(v=vs.85).aspx
 HRESULT CreateD3DDeviceManager(
@@ -736,18 +745,9 @@ void render_frame(AVFrame *frame) {
 }
 
 
-
-//
-// FFmpeg stuff below
-// More global variables:
-AVBufferRef *hw_device_ctx;
-AVBufferRef *hw_frames_ctx;
-
-
 // Ref ffmpeg_dxva2.c
 bool dxva2_get_decoder_configuration(AVCodecContext *s, const GUID *device_guid,
-	const DXVA2_VideoDesc *desc,
-	DXVA2_ConfigPictureDecode *config)
+	const DXVA2_VideoDesc *desc, DXVA2_ConfigPictureDecode *config)
 {
 	unsigned cfg_count = 0, best_score = 0;
 	DXVA2_ConfigPictureDecode *cfg_list = NULL;
@@ -789,7 +789,9 @@ bool dxva2_get_decoder_configuration(AVCodecContext *s, const GUID *device_guid,
 }
 
 // Ref ffmpeg_dxva2.c
-bool dxva2_create_decoder(AVCodecContext *s) {
+bool dxva2_create_decoder(AVCodecContext *s, 
+	AVBufferRef *hw_device_ctx, AVBufferRef **hw_frames_ctx)
+{
 	dxva_context *dxva_ctx = (dxva_context *)s->hwaccel_context;
 	DXVA2_VideoDesc desc = { 0 };
 	DXVA2_ConfigPictureDecode config;
@@ -810,7 +812,8 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 	desc.SampleHeight = s->coded_height;
 	desc.Format = target_format;
 
-	if (!dxva2_get_decoder_configuration(s, &device_guid, &desc, &config)) {
+	if (!dxva2_get_decoder_configuration(s, &device_guid, &desc, &config))
+	{
 		return false;
 	}
 
@@ -840,10 +843,10 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 	if (s->active_thread_type & FF_THREAD_FRAME)
 		num_surfaces += s->thread_count;
 
-	hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
-	if (!hw_frames_ctx) return false;
+	*hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
+	if (!*hw_frames_ctx) return false;
 
-	frames_ctx = (AVHWFramesContext*)hw_frames_ctx->data;
+	frames_ctx = (AVHWFramesContext*)(*hw_frames_ctx)->data;
 	frames_hwctx = (AVDXVA2FramesContext *)frames_ctx->hwctx;
 
 	frames_ctx->format = AV_PIX_FMT_DXVA2_VLD;
@@ -854,9 +857,9 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 
 	frames_hwctx->surface_type = DXVA2_VideoDecoderRenderTarget;
 
-	if (av_hwframe_ctx_init(hw_frames_ctx) < 0) {
+	if (av_hwframe_ctx_init(*hw_frames_ctx) < 0) {
 		printf("Failed to initialize the HW frames context\n");
-		av_buffer_unref(&hw_frames_ctx);
+		av_buffer_unref(hw_frames_ctx);
 		return false;
 	}
 
@@ -865,7 +868,7 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 		frames_hwctx->nb_surfaces, &frames_hwctx->decoder_to_release);
 	if (FAILED(hr)) {
 		printf("Failed to create DXVA2 video decoder\n");
-		av_buffer_unref(&hw_frames_ctx);
+		av_buffer_unref(hw_frames_ctx);
 		return false;
 	}
 
@@ -885,6 +888,13 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 	return true;
 }
 
+
+//
+// More global variables, needed for get_buffer callback
+AVBufferRef *global_frames_ctx;
+AVBufferRef *global_frames_ctx2;
+
+
 // Callback to negotiate the pixel format
 // @param  in_fmts  The list of formats which are supported by the codec,
 // it is terminated by -1 as 0 is a valid format, the formats are ordered by quality.
@@ -892,11 +902,13 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 // @return the chosen format
 // This callback may be called again immediately if hwaccel init for 
 // the chosen pixel format failed.
-static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *codecCtx,
+static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	const enum AVPixelFormat *in_fmts)
 {
 	AVPixelFormat fmt = AV_PIX_FMT_DXVA2_VLD;
 
+	AVBufferRef *hw_device_ctx = NULL;
+	AVBufferRef *hw_frames_ctx = NULL;
 
 	AVHWDeviceContext    *device_ctx;
 	AVDXVA2DeviceContext *device_hwctx;
@@ -915,12 +927,12 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *codecCtx,
 	device_hwctx->devmgr = d9devmng;
 
 	dxva_context *dxva_ctx = (dxva_context *)av_mallocz(sizeof(struct dxva_context));
-	codecCtx->hwaccel_context = dxva_ctx;
+	s->hwaccel_context = dxva_ctx;
 
 
-	if (!dxva2_create_decoder(codecCtx)) {
+	if (!dxva2_create_decoder(s, hw_device_ctx, &hw_frames_ctx)) {
 		av_free(dxva_ctx);
-		codecCtx->hwaccel_context = NULL;
+		s->hwaccel_context = NULL;
 		av_buffer_unref(&hw_device_ctx);
 
 		printf("Error creating the DXVA2 decoder\n");
@@ -933,21 +945,26 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *codecCtx,
 	const AVPixFmtDescriptor *dsc = av_pix_fmt_desc_get(fmt);
 	printf("Trying decoder %s\n", dsc->name);
 
+	// pointer comparison to find out which decoder we are working with
+	if (s == codecCtx) {
+		global_frames_ctx = hw_frames_ctx;
+	} else if (s == codecCtx2) {
+		global_frames_ctx2 = hw_frames_ctx;
+	}
+
 	return fmt;
 }
 
-static int ffmpeg_GetFrameBuf(struct AVCodecContext *ctx, AVFrame *frame, int flags) {
-	if (hw_frames_ctx) {
-		return av_hwframe_get_buffer(hw_frames_ctx, frame, 0);
+static int ffmpeg_GetFrameBuf(AVCodecContext *s, AVFrame *frame, int) {
+	AVBufferRef *hw_frames_ctx;
+
+	if (s == codecCtx) {
+		hw_frames_ctx = global_frames_ctx;
+	} else if (s == codecCtx2) {
+		hw_frames_ctx = global_frames_ctx2;
 	}
 
-	for (unsigned i = 0; i < AV_NUM_DATA_POINTERS; i++) {
-		frame->data[i] = NULL;
-		frame->linesize[i] = 0;
-		frame->buf[i] = NULL;
-	}
-
-	return avcodec_default_get_buffer2(ctx, frame, flags);
+	return av_hwframe_get_buffer(hw_frames_ctx, frame, 0);
 }
 
 void log_ffmpeg_error(const char *prefix, int i) {
