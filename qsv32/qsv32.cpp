@@ -30,6 +30,8 @@ RECT targetRect;
 AVFormatContext *avFormatCtx = NULL;
 AVCodecContext *codecCtx = NULL;
 UINT TimerId = 0;
+LPDIRECT3DSURFACE9 *dxva2_surfaces = NULL;
+unsigned dxva2_surfaces_count = 0;
 
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -260,6 +262,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}
 	break;
 	case WM_DESTROY:
+
+		TeardownDecoder();
+
+		teardown_d3d();
+
 		PostQuitMessage(0);
 		break;
 
@@ -424,7 +431,7 @@ void teardown_d3d()
 	if (d9RenderSurface) {
 		d9RenderSurface->Release();
 	}
-
+	
 	if (dxvadev) {
 		d9devmng->CloseDeviceHandle(dxvadev);
 		dxvadev = NULL;
@@ -824,6 +831,9 @@ bool dxva2_create_decoder(AVCodecContext *s) {
 		return false;
 	}
 
+	dxva2_surfaces = frames_hwctx->surfaces;
+	dxva2_surfaces_count = frames_hwctx->nb_surfaces;
+
 	dxva_ctx->cfg = &config;
 	dxva_ctx->decoder = frames_hwctx->decoder_to_release;
 	dxva_ctx->surface = frames_hwctx->surfaces;
@@ -1026,11 +1036,18 @@ void Decode() {
 }
 
 void TeardownDecoder() {
-	if (hw_frames_ctx) av_buffer_unref(&hw_frames_ctx);
-	if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
+	if (dxva2_surfaces_count) {
+		for (unsigned i = 0; i < dxva2_surfaces_count; i++) {
+			dxva2_surfaces[i]->Release();
+		}
+	}
+
+	// ffmpeg should have freed these, trying to free them will cause segfault
+	//if (hw_frames_ctx) av_buffer_unref(&hw_frames_ctx);
+	//if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
 
 	if (codecCtx) {
-		if (codecCtx->hwaccel_context) av_freep(&codecCtx->hwaccel_context);
+		// if (codecCtx->hwaccel_context) av_freep(&codecCtx->hwaccel_context);
 		avcodec_free_context(&codecCtx);
 	}
 
