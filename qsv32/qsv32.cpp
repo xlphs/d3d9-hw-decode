@@ -28,8 +28,7 @@ IDirectXVideoDecoderService *d9videoservice = NULL;
 HANDLE dxvadev = NULL;
 
 // Renderering Direct3D stuff
-IDirect3DSurface9 *d9RenderSurface = NULL;
-RECT targetRect;
+IDirect3DSurface9 *yuvSurface = NULL;
 
 // FFmpeg decoder
 AVFormatContext *avFormatCtx = NULL;
@@ -55,6 +54,7 @@ void teardown_d3d();
 void ClearD3DBackground();
 void CheckSupportedCodecs();
 void CheckD3D9ColorConversion();
+bool CreateOffscreenYUVSurface(int width, int height);
 
 void SetupDecoder();
 void Decode();
@@ -257,7 +257,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 		case ID_PLAYVIDEO:
 			SetupDecoder();
-			SetupDecoder2();
+			//SetupDecoder2();
 			break;
 		case ID_SNAPSHOT:
 			download_from_gpu = true;
@@ -269,7 +269,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case IDM_EXIT:
 
 			TeardownDecoder();
-			TeardownDecoder2();
+			//TeardownDecoder2();
 
 			teardown_d3d();
 
@@ -292,7 +292,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 
 		TeardownDecoder();
-		TeardownDecoder2();
+		//TeardownDecoder2();
 
 		teardown_d3d();
 
@@ -333,7 +333,7 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // Timer callback
 VOID CALLBACK TimerProc(HWND hWnd, UINT nMsg, UINT nIDEvent, DWORD dwTime) {
 	Decode();
-	Decode2();
+	//Decode2();
 	Sleep(30); // pretend 30 fps
 }
 
@@ -469,8 +469,8 @@ HRESULT CreateD3DDeviceManager(
 
 void teardown_d3d()
 {
-	if (d9RenderSurface) {
-		d9RenderSurface->Release();
+	if (yuvSurface) {
+		yuvSurface->Release();
 	}
 	
 	if (dxvadev) {
@@ -684,6 +684,52 @@ const d3d_format_t* getFormat(const AVCodecContext *avctx, GUID *selected) {
 }
 
 
+static uint32_t copy_frame_data(uint8_t *dst, uint8_t *src, int linesize,
+	int width, int height)
+{
+	if (linesize < width) {
+		width = linesize;
+	}
+	uint8_t *psrc = src;
+	for (int i = 0; i < height; ++i) {
+		memcpy(dst, psrc, width);
+		dst += width;
+		psrc += linesize;
+	}
+	return width * height;
+}
+
+void render_yuv(AVFrame *frame) {
+	// require valid yuv surface
+	if (!yuvSurface) return;
+
+	D3DLOCKED_RECT lrect;
+  HRESULT hr = yuvSurface->LockRect(&lrect, NULL, D3DLOCK_DONOTWAIT);
+  if (FAILED(hr)) {
+  	printf("LockRect failed\n");
+  	return;
+  }
+
+  byte *dest = (BYTE *)lrect.pBits;
+  int stride = lrect.Pitch;
+  if (!stride || !dest) {
+  	printf("cannot render without destination\n");
+  	yuvSurface->UnlockRect();
+  	return;
+  }
+
+  uint32_t offset = 0;
+	offset += copy_frame_data(dest, frame->data[0], frame->linesize[0],
+		frame->width, frame->height);
+
+  offset += copy_frame_data(dest + offset, frame->data[1],
+  	frame->linesize[1], frame->width / 2, frame->height / 2);
+
+  offset += copy_frame_data(dest + offset, frame->data[2],
+  	frame->linesize[2], frame->width / 2, frame->height / 2);
+
+	yuvSurface->UnlockRect(); 
+}
 
 void render_frame(AVFrame *frame) {
 	// AV_PIX_FMT_DXVA2_VLD:
@@ -698,7 +744,18 @@ void render_frame(AVFrame *frame) {
 		RECT src = { 0, 0, frame->width, frame->height};
 		d3d9dev->StretchRect(surf, &src, backbuf, NULL, D3DTEXF_LINEAR);
 
-		//d3d9dev->Present(NULL, NULL, NULL, NULL);
+		d3d9dev->Present(NULL, NULL, NULL, NULL);
+
+	}
+	else if (yuvSurface) {
+		render_yuv(frame);
+
+		IDirect3DSurface9 *backbuf = NULL;
+		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
+		d3d9dev->StretchRect(yuvSurface, NULL, backbuf, NULL, D3DTEXF_LINEAR);
+
+		d3d9dev->Present(NULL, NULL, NULL, NULL);
+
 
 	}
 }
@@ -854,6 +911,9 @@ bool dxva2_create_decoder(AVCodecContext *s,
 	dxva_ctx->surface = frames_hwctx->surfaces;
 	dxva_ctx->surface_count = frames_hwctx->nb_surfaces;
 
+	// don't let ffmpeg free dxva2 stuff
+	frames_ctx->free = NULL;
+
 	if (isIntelClearVideo(&device_guid)) {
 		printf("FF_DXVA2_WORKAROUND_INTEL_CLEARVIDEO\n");
 		dxva_ctx->workaround |= FF_DXVA2_WORKAROUND_INTEL_CLEARVIDEO;
@@ -908,6 +968,7 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	device_ctx = (AVHWDeviceContext *)hw_device_ctx->data;
 	device_hwctx = (AVDXVA2DeviceContext *)device_ctx->hwctx;
 
+	device_ctx->free = NULL;
 	device_hwctx->devmgr = d9devmng;
 
 	dxva_context *dxva_ctx = (dxva_context *)av_mallocz(sizeof(struct dxva_context));
@@ -915,13 +976,21 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 
 
 	if (!dxva2_create_decoder(s, hw_device_ctx, &hw_frames_ctx)) {
+		device_ctx->free = NULL;
 		av_free(dxva_ctx);
 		s->hwaccel_context = NULL;
 		av_buffer_unref(&hw_device_ctx);
 
 		printf("Error creating the DXVA2 decoder\n");
 
-		return AV_PIX_FMT_NONE;
+		if (CreateOffscreenYUVSurface(s->width, s->height)) {
+			// allow surface now to indicate we are doing SW decoding
+			printf("Falling back to software decoding\n");
+			return AV_PIX_FMT_YUV420P;
+		}
+		else {
+			return AV_PIX_FMT_NONE;
+		}
 	}
 
 	const AVPixFmtDescriptor *dsc = av_pix_fmt_desc_get(fmt);
@@ -939,7 +1008,17 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	return fmt;
 }
 
-static int ffmpeg_GetFrameBuf(AVCodecContext *s, AVFrame *frame, int) {
+static int ffmpeg_GetFrameBuf(AVCodecContext *s, AVFrame *frame, int flags) {
+	if (yuvSurface) {
+		// software decoding
+		for (unsigned i = 0; i < AV_NUM_DATA_POINTERS; i++) {
+			frame->data[i] = NULL;
+			frame->linesize[i] = 0;
+			frame->buf[i] = NULL;
+		}
+		return avcodec_default_get_buffer2(s, frame, flags);
+	}
+
 	AVBufferRef *hw_frames_ctx;
 
 	if (s == codecCtx) {
@@ -960,8 +1039,7 @@ void log_ffmpeg_error(const char *prefix, int i) {
 void SetupDecoder() {
 
 	// This is in the project directory (not root directory)
-	// const char *video_file = "snip.mp4";
-	const char *video_file = "C:\\Users\\marica\\Videos\\hevc\\hevc_test.mp4";
+	const char *video_file = "baseline.mp4";
 	
 	printf("Input file: %s\n", video_file);
 
@@ -1396,4 +1474,42 @@ void TeardownDecoder2() {
 	}
 
 	if (avFormatCtx2) avformat_close_input(&avFormatCtx2);
+}
+
+// we use cpu to convert yuv into yuv12, not efficient but it works
+bool CreateOffscreenYUVSurface(int width, int height) {
+	if (yuvSurface) return true; // assume width/height doesn't change
+
+															 // We want to let D3D9 convert YUV420P to RGB
+	HRESULT hr = pD3D->CheckDeviceFormatConversion(D3DADAPTER_DEFAULT,
+		D3DDEVTYPE_HAL,
+		(D3DFORMAT)MAKEFOURCC('I', '4', '2', '0'),
+		D3DFMT_X8R8G8B8);
+
+	if (hr == D3D_OK) {
+		printf("I420 color conversion is supported.\n");
+	}
+	else if (hr == D3DERR_INVALIDCALL) {
+		printf("CheckDeviceFormatConversion failed.\n");
+		return false;
+	}
+	else if (hr == D3DERR_NOTAVAILABLE) {
+		printf("The hardware does not support conversion between I420 and X8R8G8B8.\n");
+		return false;
+	}
+
+	hr = d3d9dev->CreateOffscreenPlainSurface(width,
+		height,
+		(D3DFORMAT)MAKEFOURCC('I', '4', '2', '0'),
+		D3DPOOL_DEFAULT,
+		&yuvSurface,
+		NULL);
+
+	if (hr == D3D_OK) {
+		printf("Created offscreen plain surface %ix%i for yuv rendering\n", width, height);
+		return true;
+	}
+
+	printf("CreateOffscreenPlainSurface error\n");
+	return false;
 }
