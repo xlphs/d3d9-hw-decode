@@ -257,7 +257,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 		case ID_PLAYVIDEO:
 			SetupDecoder();
-			//SetupDecoder2();
+			SetupDecoder2();
 			break;
 		case ID_SNAPSHOT:
 			download_from_gpu = true;
@@ -269,7 +269,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case IDM_EXIT:
 
 			TeardownDecoder();
-			//TeardownDecoder2();
+			TeardownDecoder2();
 
 			teardown_d3d();
 
@@ -292,7 +292,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_DESTROY:
 
 		TeardownDecoder();
-		//TeardownDecoder2();
+		TeardownDecoder2();
 
 		teardown_d3d();
 
@@ -333,7 +333,7 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // Timer callback
 VOID CALLBACK TimerProc(HWND hWnd, UINT nMsg, UINT nIDEvent, DWORD dwTime) {
 	Decode();
-	//Decode2();
+	Decode2();
 	Sleep(30); // pretend 30 fps
 }
 
@@ -405,6 +405,8 @@ void setup_d3d() {
 		return;
 	}
 
+	d9devmng->AddRef();
+
 	// Ref https://msdn.microsoft.com/en-us/library/windows/desktop/cc307964(v=vs.85).aspx
 	// Here we create the video service so FFmpeg can use IDirect3DDeviceManager9::GetVideoService
 	// later to retrieve this
@@ -413,7 +415,43 @@ void setup_d3d() {
 		return;
 	}
 
+	d9videoservice->AddRef();
+
 	printf("Successfully setup D3D contexts for decoding acceleration\n");
+}
+
+
+void EnsureDXVA2Service() {
+	// Ref: https://msdn.microsoft.com/en-us/library/windows/desktop/aa965267(v=vs.85).aspx
+	// Use lock device to see if device handle is still valid
+	// because we cannot AddRef() on device handle
+
+	IDirect3DDevice9  *outdev;
+
+	HRESULT hr = d9devmng->LockDevice(dxvadev, &outdev, false);
+
+	if (hr == S_OK) {
+		d9devmng->UnlockDevice(dxvadev, false);
+		printf("The dxva2 device can be locked.\n");
+		return;
+	}
+
+	if (hr == DXVA2_E_NEW_VIDEO_DEVICE) {
+		printf("The device handle is invalid.\n");
+	} else if (hr == DXVA2_E_VIDEO_DEVICE_LOCKED) {
+		printf("The device is already locked.\n");
+		return;
+	} else if (hr == E_HANDLE) {
+		printf("The specified handle is not a Direct3D device handle.\n");
+		return;
+	}
+
+	if (d9devmng->OpenDeviceHandle(&dxvadev) != S_OK) {
+		printf("Failed to get Direct3D device handle\n");
+		return;
+	}
+
+	printf("Recreated device handle!\n");
 }
 
 void CheckD3D9ColorConversion() {
@@ -744,8 +782,7 @@ void render_frame(AVFrame *frame) {
 		RECT src = { 0, 0, frame->width, frame->height};
 		d3d9dev->StretchRect(surf, &src, backbuf, NULL, D3DTEXF_LINEAR);
 
-		d3d9dev->Present(NULL, NULL, NULL, NULL);
-
+		//d3d9dev->Present(NULL, NULL, NULL, NULL);
 	}
 	else if (yuvSurface) {
 		render_yuv(frame);
@@ -754,9 +791,7 @@ void render_frame(AVFrame *frame) {
 		d3d9dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuf);
 		d3d9dev->StretchRect(yuvSurface, NULL, backbuf, NULL, D3DTEXF_LINEAR);
 
-		d3d9dev->Present(NULL, NULL, NULL, NULL);
-
-
+		//d3d9dev->Present(NULL, NULL, NULL, NULL);
 	}
 }
 
@@ -774,7 +809,6 @@ void render_frame(AVFrame *frame, const RECT *rect) {
 		d3d9dev->StretchRect(surf, &src, backbuf, rect, D3DTEXF_LINEAR);
 
 		d3d9dev->Present(NULL, NULL, NULL, NULL);
-
 	}
 }
 
@@ -911,9 +945,6 @@ bool dxva2_create_decoder(AVCodecContext *s,
 	dxva_ctx->surface = frames_hwctx->surfaces;
 	dxva_ctx->surface_count = frames_hwctx->nb_surfaces;
 
-	// don't let ffmpeg free dxva2 stuff
-	frames_ctx->free = NULL;
-
 	if (isIntelClearVideo(&device_guid)) {
 		printf("FF_DXVA2_WORKAROUND_INTEL_CLEARVIDEO\n");
 		dxva_ctx->workaround |= FF_DXVA2_WORKAROUND_INTEL_CLEARVIDEO;
@@ -940,6 +971,8 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	const enum AVPixelFormat *in_fmts)
 {
 	AVPixelFormat fmt = AV_PIX_FMT_DXVA2_VLD;
+
+	EnsureDXVA2Service();
 
 	if (s == codecCtx) {
 		printf("ffmpeg_GetFormat callback for primary video\n");
@@ -968,7 +1001,6 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 	device_ctx = (AVHWDeviceContext *)hw_device_ctx->data;
 	device_hwctx = (AVDXVA2DeviceContext *)device_ctx->hwctx;
 
-	device_ctx->free = NULL;
 	device_hwctx->devmgr = d9devmng;
 
 	dxva_context *dxva_ctx = (dxva_context *)av_mallocz(sizeof(struct dxva_context));
@@ -976,7 +1008,6 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 
 
 	if (!dxva2_create_decoder(s, hw_device_ctx, &hw_frames_ctx)) {
-		device_ctx->free = NULL;
 		av_free(dxva_ctx);
 		s->hwaccel_context = NULL;
 		av_buffer_unref(&hw_device_ctx);
@@ -1009,19 +1040,21 @@ static enum AVPixelFormat ffmpeg_GetFormat(AVCodecContext *s,
 }
 
 static int ffmpeg_GetFrameBuf(AVCodecContext *s, AVFrame *frame, int flags) {
-	if (yuvSurface) {
-		// software decoding
-		for (unsigned i = 0; i < AV_NUM_DATA_POINTERS; i++) {
-			frame->data[i] = NULL;
-			frame->linesize[i] = 0;
-			frame->buf[i] = NULL;
-		}
-		return avcodec_default_get_buffer2(s, frame, flags);
-	}
-
 	AVBufferRef *hw_frames_ctx;
 
 	if (s == codecCtx) {
+
+		// only primary decoder has SW fallback
+		if (yuvSurface) {
+			// software decoding
+			for (unsigned i = 0; i < AV_NUM_DATA_POINTERS; i++) {
+				frame->data[i] = NULL;
+				frame->linesize[i] = 0;
+				frame->buf[i] = NULL;
+			}
+			return avcodec_default_get_buffer2(s, frame, flags);
+		}
+
 		hw_frames_ctx = global_frames_ctx;
 	} else if (s == codecCtx2) {
 		hw_frames_ctx = global_frames_ctx2;
