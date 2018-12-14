@@ -1,6 +1,4 @@
-# qsv32
-
-playing with dxva2 and qsv on windows 10
+# d3d9-hw-decode
 
 I supplied the dll files and a video snippet but in order to compile you will 
 still need ffmpeg
